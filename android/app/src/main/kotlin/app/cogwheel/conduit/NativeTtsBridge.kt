@@ -1,5 +1,6 @@
 package app.cogwheel.conduit
 
+import android.content.Context
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioManager
@@ -19,7 +20,7 @@ import io.flutter.plugin.common.MethodChannel
 import java.util.Locale
 import java.util.UUID
 
-class NativeTtsBridge(private val activity: MainActivity) : MethodChannel.MethodCallHandler,
+class NativeTtsBridge(context: Context) : MethodChannel.MethodCallHandler,
     EventChannel.StreamHandler {
     private enum class InitState {
         NOT_STARTED,
@@ -27,6 +28,8 @@ class NativeTtsBridge(private val activity: MainActivity) : MethodChannel.Method
         READY,
         FAILED
     }
+
+    private val appContext = context.applicationContext
 
     private data class SpeakRequest(
         val text: String,
@@ -159,7 +162,7 @@ class NativeTtsBridge(private val activity: MainActivity) : MethodChannel.Method
         // has to set the attributes again rather than trust the cached value.
         appliedVoiceCallRouting = null
         pendingInitCallbacks.add(callback)
-        tts = TextToSpeech(activity.applicationContext) { status ->
+        tts = TextToSpeech(appContext) { status ->
             mainHandler.post {
                 val ready = status == TextToSpeech.SUCCESS
                 initState = if (ready) InitState.READY else InitState.FAILED

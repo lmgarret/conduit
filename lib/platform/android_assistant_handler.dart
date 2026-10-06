@@ -42,6 +42,31 @@ class AndroidAssistantHandler {
 
   AndroidAssistantHandler(this._ref) {
     platform.setMethodCallHandler(_handleMethodCall);
+    unawaited(_takePendingLaunch());
+  }
+
+  /// Runs the launch that arrived before this handler existed. On a cold
+  /// start MainActivity has the intent before Dart runs, so it keeps it until
+  /// asked (`AssistantLaunchChannel` in AssistantChannels.kt) (#514).
+  Future<void> _takePendingLaunch() async {
+    try {
+      final pending = await platform.invokeMapMethod<String, Object?>(
+        'assistantReady',
+      );
+      final method = pending?['method'];
+      if (method is String) {
+        await _handleMethodCall(MethodCall(method, pending!['argument']));
+      }
+    } on MissingPluginException {
+      // No native assistant in this runtime.
+    } catch (error, stackTrace) {
+      DebugLogger.error(
+        'pending-launch-failed',
+        scope: 'assistant',
+        error: error,
+        stackTrace: stackTrace,
+      );
+    }
   }
 
   Future<void> _handleMethodCall(MethodCall call) async {

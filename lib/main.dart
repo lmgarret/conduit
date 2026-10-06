@@ -19,6 +19,8 @@ import 'package:package_info_plus/package_info_plus.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'shared/widgets/error_boundary.dart';
+import 'platform/android_assistant_handler.dart';
+import 'platform/android_assistant_overlay.dart';
 import 'platform/android_ime_inset_resync.dart';
 import 'platform/flutter_app_lifecycle.dart';
 import 'platform/flutter_clipboard_port.dart';
@@ -369,6 +371,11 @@ void main() {
             carPlayBridgeProvider.overrideWithValue(
               const MethodChannelCarPlayBridge(),
             ),
+          // The assistant sheet over other apps (AssistantChannels.kt).
+          if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android)
+            assistantOverlayBridgeProvider.overrideWithValue(
+              const MethodChannelAssistantOverlayBridge(),
+            ),
           hostHermesDashboardBridgeFactoryProvider.overrideWith(
             (ref) =>
                 ({required root, required accessHeaders}) =>
@@ -421,6 +428,13 @@ void main() {
       // CarPlay can cold-launch Conduit without a visible Flutter scene, so
       // install its method-channel handler before frame-scheduled startup work.
       providerContainer.read(carPlayCoordinatorProvider);
+      // Likewise the Android assistant can start the engine with no activity
+      // (ConduitEngineHost.kt), and a cold launch's assistant intent must find
+      // its handler installed (#514).
+      if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
+        providerContainer.read(androidAssistantOverlayProvider);
+        providerContainer.read(androidAssistantProvider);
+      }
 
       installConduitErrorWidgetBuilder();
 

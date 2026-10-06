@@ -1412,9 +1412,21 @@
   "@androidAssistantNewChatOption": {
     "description": "Option label for opening the app to a fresh chat from the assistant trigger."
   },
-  "androidAssistantVoiceCallOption": "Začať hlasový hovor",
+  "androidAssistantVoiceCallOption": "Začať hlasový hovor v prekryvnom okne",
   "@androidAssistantVoiceCallOption": {
     "description": "Option label for jumping straight into voice call from assistant trigger."
+  },
+  "assistantOpenInApp": "Otvoriť v aplikácii",
+  "@assistantOpenInApp": {
+    "description": "Assistant overlay button that continues the current voice call or chat in the full app."
+  },
+  "assistantSummarizePage": "Zhrnúť stránku",
+  "@assistantSummarizePage": {
+    "description": "Assistant overlay button that sends the on-screen text to a new chat for a summary."
+  },
+  "assistantAskAboutPage": "Opýtať sa na stránku",
+  "@assistantAskAboutPage": {
+    "description": "Assistant overlay button that attaches a screenshot of the current screen to a new chat."
   },
   "sttSettings": "Reč na text",
   "@sttSettings": {

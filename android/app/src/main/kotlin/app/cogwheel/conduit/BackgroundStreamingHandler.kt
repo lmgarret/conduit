@@ -18,7 +18,9 @@ import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.ProcessLifecycleOwner
 import io.flutter.embedding.engine.FlutterEngine
 import kotlinx.coroutines.*
 
@@ -521,7 +523,13 @@ class BackgroundStreamingService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 }
 
-class BackgroundStreamingHandler(private val activity: MainActivity) : BackgroundStreamingHostApi {
+/**
+ * Owned by [ConduitEngineHost] for the engine's lifetime, so it outlives
+ * MainActivity: the assistant overlay drives the same engine with no activity.
+ * Foreground is the process (any visible activity), not one activity.
+ */
+class BackgroundStreamingHandler(hostContext: Context) : BackgroundStreamingHostApi {
+    private val appContext = hostContext.applicationContext
     private lateinit var flutterApi: BackgroundStreamingFlutterApi
     private lateinit var context: Context
 
@@ -546,12 +554,8 @@ class BackgroundStreamingHandler(private val activity: MainActivity) : Backgroun
         }
 
         override fun onPause(owner: LifecycleOwner) {
-            // Ignore configuration changes to avoid foreground-service churn
-            // during rotations and other activity recreation events.
-            if (activity.isChangingConfigurations) {
-                return
-            }
-
+            // ProcessLifecycleOwner delays this past configuration changes, so
+            // rotations and activity recreation don't churn the service.
             isActivityForeground = false
 
             if (activeLeases.isNotEmpty()) {
@@ -568,13 +572,14 @@ class BackgroundStreamingHandler(private val activity: MainActivity) : Backgroun
         val messenger = flutterEngine.dartExecutor.binaryMessenger
         flutterApi = BackgroundStreamingFlutterApi(messenger)
         BackgroundStreamingHostApi.setUp(messenger, this)
-        context = activity.applicationContext
-        isActivityForeground = !activity.isFinishing
+        context = appContext
+        isActivityForeground = ProcessLifecycleOwner.get().lifecycle.currentState
+            .isAtLeast(Lifecycle.State.RESUMED)
 
         createNotificationChannel()
         setupBroadcastReceiver()
         if (!lifecycleObserverRegistered) {
-            activity.lifecycle.addObserver(activityLifecycleObserver)
+            ProcessLifecycleOwner.get().lifecycle.addObserver(activityLifecycleObserver)
             lifecycleObserverRegistered = true
         }
     }
@@ -967,7 +972,7 @@ class BackgroundStreamingHandler(private val activity: MainActivity) : Backgroun
         stopBackgroundMonitoring()
         stopForegroundService()
         if (lifecycleObserverRegistered) {
-            activity.lifecycle.removeObserver(activityLifecycleObserver)
+            ProcessLifecycleOwner.get().lifecycle.removeObserver(activityLifecycleObserver)
             lifecycleObserverRegistered = false
         }
         

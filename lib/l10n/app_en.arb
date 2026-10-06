@@ -1660,9 +1660,21 @@
   "@androidAssistantNewChatOption": {
     "description": "Option label for opening the app to a fresh chat from the assistant trigger."
   },
-  "androidAssistantVoiceCallOption": "Start a voice call",
+  "androidAssistantVoiceCallOption": "Start a voice call in the overlay",
   "@androidAssistantVoiceCallOption": {
-    "description": "Option label for jumping straight into voice call from assistant trigger."
+    "description": "Option label for starting a voice call in the assistant overlay, over the current app."
+  },
+  "assistantOpenInApp": "Open in app",
+  "@assistantOpenInApp": {
+    "description": "Assistant overlay button that continues the current voice call or chat in the full app."
+  },
+  "assistantSummarizePage": "Summarize page",
+  "@assistantSummarizePage": {
+    "description": "Assistant overlay button that sends the on-screen text to a new chat for a summary."
+  },
+  "assistantAskAboutPage": "Ask about page",
+  "@assistantAskAboutPage": {
+    "description": "Assistant overlay button that attaches a screenshot of the current screen to a new chat."
   },
   "sttSettings": "Speech to text",
   "@sttSettings": {

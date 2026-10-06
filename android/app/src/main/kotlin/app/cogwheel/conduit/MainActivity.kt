@@ -517,12 +517,8 @@ internal fun loadPendingShareState(
 }
 
 class MainActivity : FlutterFragmentActivity() {
-    private lateinit var backgroundStreamingHandler: BackgroundStreamingHandler
-    private lateinit var nativeSttBridge: NativeSttBridge
-    private lateinit var nativeTtsBridge: NativeTtsBridge
-    private lateinit var imageGalleryBridge: ImageGalleryBridge
-
     override fun onCreate(savedInstanceState: Bundle?) {
+        ConduitEngineHost.activityAttached()
         reconcileInterruptedShareImportIfNeeded()
         sanitizeLaunchIntent(intent)?.let { setIntent(it) }
         enableEdgeToEdge()
@@ -565,7 +561,6 @@ class MainActivity : FlutterFragmentActivity() {
         }
     }
     
-    private val ASSISTANT_CHANNEL = "app.cogwheel.conduit/assistant"
     private val SHARE_TEXT_CHANNEL = "conduit/share_receiver_text"
     private val KEYBOARD_INSETS_CHANNEL = "app.cogwheel.conduit/keyboard_insets"
     private val HOME_WIDGET_LAUNCH_ACTION = "es.antonborri.home_widget.action.LAUNCH"
@@ -577,8 +572,9 @@ class MainActivity : FlutterFragmentActivity() {
     private val PENDING_SHARE_STATE_FILE_NAME = "pending-share-state-v1.json"
     private val SHARE_STAGING_DIRECTORY_NAME = "conduit-shared-intents"
     private val maxSharedFileCount = 6
-    private var methodChannel: MethodChannel? = null
     private var shareChannel: MethodChannel? = null
+    private var keyboardInsetsChannel: MethodChannel? = null
+    private var cookieChannel: MethodChannel? = null
     private var pendingStagedShareInProgress: Boolean
         get() = PendingShareImportRuntime.isImportInProgress
         set(value) {
@@ -614,20 +610,17 @@ class MainActivity : FlutterFragmentActivity() {
         SUPERSEDED
     }
 
+    /**
+     * The engine is shared with the assistant sheet ([ConduitEngineHost]),
+     * which also owns the bridges that need only a Context. The channels set
+     * up in [configureFlutterEngine] are this activity's own.
+     */
+    override fun provideFlutterEngine(context: Context): FlutterEngine =
+        ConduitEngineHost.obtain(context)
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
 
-        // Initialize background streaming handler
-        backgroundStreamingHandler = BackgroundStreamingHandler(this)
-        backgroundStreamingHandler.setup(flutterEngine)
-        nativeSttBridge = NativeSttBridge(this)
-        nativeSttBridge.setup(flutterEngine)
-        nativeTtsBridge = NativeTtsBridge(this)
-        nativeTtsBridge.setup(flutterEngine)
-        imageGalleryBridge = ImageGalleryBridge(this)
-        imageGalleryBridge.setup(flutterEngine)
-
-        methodChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, ASSISTANT_CHANNEL)
         shareChannel = MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
             SHARE_TEXT_CHANNEL
@@ -666,10 +659,11 @@ class MainActivity : FlutterFragmentActivity() {
             }
         }
         
-        MethodChannel(
+        keyboardInsetsChannel = MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
             KEYBOARD_INSETS_CHANNEL
-        ).setMethodCallHandler { call, result ->
+        )
+        keyboardInsetsChannel?.setMethodCallHandler { call, result ->
             when (call.method) {
                 "resyncImeInsets" -> result.success(resyncStaleImeInsets())
                 else -> result.notImplemented()
@@ -677,12 +671,12 @@ class MainActivity : FlutterFragmentActivity() {
         }
 
         // Setup cookie manager channel for WebView cookie access
-        val cookieChannel = MethodChannel(
+        cookieChannel = MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
             "com.conduit.app/cookies"
         )
         
-        cookieChannel.setMethodCallHandler { call, result ->
+        cookieChannel?.setMethodCallHandler { call, result ->
             if (call.method == "getCookies") {
                 val url = call.argument<String>("url")
                 if (url == null) {
@@ -702,6 +696,18 @@ class MainActivity : FlutterFragmentActivity() {
         
         // Check if started with context
         handleIntent(intent)
+    }
+
+    override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {
+        // The engine can outlive this activity (the assistant sheet keeps
+        // using it), so its handlers must not keep calling into a destroyed one.
+        shareChannel?.setMethodCallHandler(null)
+        keyboardInsetsChannel?.setMethodCallHandler(null)
+        cookieChannel?.setMethodCallHandler(null)
+        shareChannel = null
+        keyboardInsetsChannel = null
+        cookieChannel = null
+        super.cleanUpFlutterEngine(flutterEngine)
     }
 
     /**
@@ -1745,34 +1751,25 @@ class MainActivity : FlutterFragmentActivity() {
 
         if (startVoiceCall) {
             Log.d("MainActivity", "Invoking startVoiceCall")
-            methodChannel?.invokeMethod("startVoiceCall", null)
+            ConduitEngineHost.assistantLaunch?.dispatch("startVoiceCall", null)
         } else if (startNewChat) {
             Log.d("MainActivity", "Invoking startNewChat")
-            methodChannel?.invokeMethod("startNewChat", null)
+            ConduitEngineHost.assistantLaunch?.dispatch("startNewChat", null)
         } else if (screenContext != null) {
             Log.d("MainActivity", "Invoking analyzeScreen")
-            methodChannel?.invokeMethod("analyzeScreen", screenContext)
+            ConduitEngineHost.assistantLaunch?.dispatch("analyzeScreen", screenContext)
         } else if (screenshotPath != null) {
             Log.d("MainActivity", "Invoking analyzeScreenshot")
-            methodChannel?.invokeMethod("analyzeScreenshot", screenshotPath)
+            ConduitEngineHost.assistantLaunch?.dispatch("analyzeScreenshot", screenshotPath)
         } else {
             Log.d("MainActivity", "No screen context or screenshot path found")
         }
     }
     
     override fun onDestroy() {
-        if (::nativeSttBridge.isInitialized) {
-            nativeSttBridge.dispose()
-        }
-        if (::nativeTtsBridge.isInitialized) {
-            nativeTtsBridge.dispose()
-        }
-        if (::imageGalleryBridge.isInitialized) {
-            imageGalleryBridge.dispose()
-        }
-        if (::backgroundStreamingHandler.isInitialized) {
-            backgroundStreamingHandler.cleanup()
-        }
         super.onDestroy()
+        // The engine and its bridges are released once neither this activity
+        // nor the assistant sheet uses them (ConduitEngineHost).
+        ConduitEngineHost.activityDetached()
     }
 }

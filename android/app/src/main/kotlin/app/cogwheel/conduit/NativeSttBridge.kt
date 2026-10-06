@@ -1,14 +1,18 @@
 package app.cogwheel.conduit
 
+import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.speech.RecognitionListener
 import android.speech.RecognitionSupport
 import android.speech.RecognitionSupportCallback
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer as AndroidSpeechRecognizer
 import android.util.Log
+import androidx.core.content.ContextCompat
 import com.google.mlkit.genai.common.DownloadStatus
 import com.google.mlkit.genai.common.FeatureStatus
 import com.google.mlkit.genai.common.audio.AudioSource
@@ -36,8 +40,10 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
-class NativeSttBridge(private val activity: MainActivity) : MethodChannel.MethodCallHandler,
+class NativeSttBridge(context: Context) : MethodChannel.MethodCallHandler,
     EventChannel.StreamHandler {
+    private val appContext = context.applicationContext
+    private val mainHandler = Handler(Looper.getMainLooper())
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var eventSink: EventChannel.EventSink? = null
     @Volatile
@@ -479,7 +485,7 @@ class NativeSttBridge(private val activity: MainActivity) : MethodChannel.Method
     }
 
     private fun createPlatformRecognizer(allowOnlineFallback: Boolean): AndroidSpeechRecognizer {
-        val context = activity.applicationContext
+        val context = appContext
         return if (usesSystemOnDeviceRecognizer(allowOnlineFallback)) {
             AndroidSpeechRecognizer.createOnDeviceSpeechRecognizer(context)
         } else {
@@ -489,7 +495,7 @@ class NativeSttBridge(private val activity: MainActivity) : MethodChannel.Method
 
     private fun systemOnDeviceRecognitionAvailable(): Boolean {
         return Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
-            AndroidSpeechRecognizer.isOnDeviceRecognitionAvailable(activity.applicationContext)
+            AndroidSpeechRecognizer.isOnDeviceRecognitionAvailable(appContext)
     }
 
     private fun usesSystemOnDeviceRecognizer(allowOnlineFallback: Boolean): Boolean {
@@ -501,7 +507,7 @@ class NativeSttBridge(private val activity: MainActivity) : MethodChannel.Method
     }
 
     private fun platformRecognizerAvailable(allowOnlineFallback: Boolean): Boolean {
-        val context = activity.applicationContext
+        val context = appContext
         return NativeSttLanguagePolicy.platformRecognizerAvailable(
             allowOnlineFallback = allowOnlineFallback,
             sdkInt = Build.VERSION.SDK_INT,
@@ -761,7 +767,7 @@ class NativeSttBridge(private val activity: MainActivity) : MethodChannel.Method
                 }
                 checkRecognizer.checkRecognitionSupport(
                     supportIntent,
-                    activity.mainExecutor,
+                    ContextCompat.getMainExecutor(appContext),
                     object : RecognitionSupportCallback {
                         override fun onSupportResult(recognitionSupport: RecognitionSupport) {
                             supportResult.complete(recognitionSupport)
@@ -954,8 +960,10 @@ class NativeSttBridge(private val activity: MainActivity) : MethodChannel.Method
     }
 
     private fun emit(event: Map<String, Any?>) {
-        activity.runOnUiThread {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
             eventSink?.success(event)
+        } else {
+            mainHandler.post { eventSink?.success(event) }
         }
     }
 

@@ -1,66 +1,370 @@
 package app.cogwheel.conduit
 
+import android.Manifest
+import android.app.assist.AssistContent
+import android.app.assist.AssistStructure
 import android.content.Context
 import android.content.Intent
-import android.service.voice.VoiceInteractionSession
-import android.os.Bundle
-import android.app.assist.AssistStructure
-import android.app.assist.AssistContent
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.os.Bundle
+import android.service.voice.VoiceInteractionSession
+import android.text.Editable
+import android.text.TextWatcher
+import android.view.View
+import android.view.ViewGroup
+import android.view.WindowManager
+import android.view.inputmethod.EditorInfo
+import android.widget.EditText
+import android.widget.ImageView
+import android.widget.ScrollView
+import android.widget.TextView
 
-class ConduitVoiceInteractionSession(context: Context) : VoiceInteractionSession(context) {
+/**
+ * The assistant sheet shown over the current app.
+ *
+ * A voice call, or dictation with a text reply, runs right here: the sheet
+ * drives the app's shared Flutter engine ([ConduitEngineHost]) through
+ * [AssistantOverlayBridge], and draws the state its Dart coordinator
+ * (`lib/platform/android_assistant_overlay.dart`) sends back. Dismissing the
+ * sheet returns to whatever was on screen; "open in app" continues the same
+ * call or chat in MainActivity.
+ */
+class ConduitVoiceInteractionSession(context: Context) :
+    VoiceInteractionSession(context), AssistantOverlayBridge.Listener {
 
     companion object {
+        private const val TAG = "ConduitVoiceSession"
         private const val PREFS_FILE = "FlutterSharedPreferences"
         private const val TRIGGER_KEY = "flutter.android_assistant_trigger"
         private const val TRIGGER_OVERLAY = "overlay"
         private const val TRIGGER_NEW_CHAT = "new_chat"
         private const val TRIGGER_VOICE_CALL = "voice_call"
+        private const val REPLY_MAX_HEIGHT_FRACTION = 0.35f
+        private const val TOGGLE_ON_ICON_COLOR = 0xFF1F1F1F.toInt()
+
+        /** The last localized labels from Dart, for the moment before it answers. */
+        private var cachedLabels: Map<String, String> = emptyMap()
     }
 
     private var capturedContext: String? = null
     private var capturedScreenshot: Bitmap? = null
 
-    override fun onCreateContentView(): android.view.View {
-        when (getTriggerPreference()) {
-            TRIGGER_NEW_CHAT -> {
-                launchAppForNewChat()
-                return android.view.View(context)
-            }
-            TRIGGER_VOICE_CALL -> {
-                launchAppForVoiceCall()
-                return android.view.View(context)
-            }
+    private var bridge: AssistantOverlayBridge? = null
+    private var engineAttached = false
+    private var isDictating = false
+    private var isBusy = false
+
+    private var root: View? = null
+    private lateinit var pageActions: View
+    private lateinit var conversationCard: View
+    private lateinit var titleText: TextView
+    private lateinit var statusText: TextView
+    private lateinit var transcriptText: TextView
+    private lateinit var replyScroll: ScrollView
+    private lateinit var replyText: TextView
+    private lateinit var errorText: TextView
+    private lateinit var callControls: View
+    private lateinit var muteButton: View
+    private lateinit var muteIcon: ImageView
+    private lateinit var speakerButton: View
+    private lateinit var speakerIcon: ImageView
+    private lateinit var inputBar: View
+    private lateinit var inputField: EditText
+    private lateinit var sendButton: View
+    private lateinit var dictationButton: View
+    private lateinit var dictationIcon: ImageView
+    private lateinit var voiceButton: View
+    private lateinit var openAppButton: View
+    private lateinit var endCallButton: View
+
+    override fun onCreate() {
+        super.onCreate()
+        // The sheet has a text field; let the keyboard push it up.
+        @Suppress("DEPRECATION")
+        window?.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+    }
+
+    override fun onCreateContentView(): View {
+        if (getTriggerPreference() == TRIGGER_NEW_CHAT) {
+            launchAppForNewChat()
+            return View(context)
         }
 
-        val view = layoutInflater.inflate(app.cogwheel.conduit.R.layout.assistant_overlay, null)
+        val view = layoutInflater.inflate(R.layout.assistant_overlay, null)
+        bindViews(view)
+        root = view
+        return view
+    }
 
-        // Summarize page button - sends screen context
-        val summarizeButton = view.findViewById<android.view.View>(app.cogwheel.conduit.R.id.btn_summarize)
-        summarizeButton?.setOnClickListener {
-            launchAppWithContext(includeScreenshot = false)
+    override fun onShow(args: Bundle?, showFlags: Int) {
+        super.onShow(args, showFlags)
+        if (root == null) return
+
+        val autoStartCall = getTriggerPreference() == TRIGGER_VOICE_CALL
+        if (autoStartCall && !hasMicrophonePermission()) {
+            // Only the app can ask for the permission; it starts the call there.
+            launchAppForVoiceCall()
+            return
         }
 
-        // Ask about page button - sends screenshot
-        val askAboutButton = view.findViewById<android.view.View>(app.cogwheel.conduit.R.id.btn_ask_about)
-        askAboutButton?.setOnClickListener {
+        attachEngine()
+        if (autoStartCall) {
+            render(
+                mapOf(
+                    "mode" to "call",
+                    "status" to (cachedLabels["connecting"] ?: "…"),
+                    "labels" to cachedLabels,
+                )
+            )
+        } else {
+            render(mapOf("mode" to "idle", "labels" to cachedLabels))
+        }
+        bridge?.send("overlayShown", mapOf("autoStartCall" to autoStartCall))
+    }
+
+    override fun onHide() {
+        detachEngine()
+        super.onHide()
+    }
+
+    override fun onDestroy() {
+        detachEngine()
+        super.onDestroy()
+    }
+
+    override fun onBackPressed() {
+        finish()
+    }
+
+    private fun attachEngine() {
+        if (engineAttached) return
+        ConduitEngineHost.obtain(context)
+        ConduitEngineHost.assistantAttached()
+        engineAttached = true
+        bridge = ConduitEngineHost.assistantOverlay?.also { it.listener = this }
+    }
+
+    private fun detachEngine() {
+        if (!engineAttached) return
+        engineAttached = false
+        bridge?.let {
+            // A sheet dismissed while the engine was still starting must not
+            // start its call afterwards.
+            it.clearPending()
+            it.send("overlayDismissed")
+            if (it.listener === this) it.listener = null
+        }
+        bridge = null
+        ConduitEngineHost.assistantDetached()
+    }
+
+    private fun bindViews(view: View) {
+        pageActions = view.findViewById(R.id.page_actions)
+        conversationCard = view.findViewById(R.id.conversation_card)
+        titleText = view.findViewById(R.id.title_text)
+        statusText = view.findViewById(R.id.status_text)
+        transcriptText = view.findViewById(R.id.transcript_text)
+        replyScroll = view.findViewById(R.id.reply_scroll)
+        replyText = view.findViewById(R.id.reply_text)
+        errorText = view.findViewById(R.id.error_text)
+        callControls = view.findViewById(R.id.call_controls)
+        muteButton = view.findViewById(R.id.btn_mute)
+        muteIcon = view.findViewById(R.id.icon_mute)
+        speakerButton = view.findViewById(R.id.btn_speaker)
+        speakerIcon = view.findViewById(R.id.icon_speaker)
+        inputBar = view.findViewById(R.id.input_bar)
+        inputField = view.findViewById(R.id.input_field)
+        sendButton = view.findViewById(R.id.btn_send)
+        dictationButton = view.findViewById(R.id.btn_dictation)
+        dictationIcon = view.findViewById(R.id.icon_dictation)
+        voiceButton = view.findViewById(R.id.btn_voice)
+        openAppButton = view.findViewById(R.id.btn_open_app)
+        endCallButton = view.findViewById(R.id.btn_end_call)
+
+        // Tapping outside the sheet dismisses it.
+        view.findViewById<View>(R.id.scrim).setOnClickListener { finish() }
+
+        view.findViewById<View>(R.id.btn_summarize).setOnClickListener {
+            launchAppWithContext()
+        }
+        view.findViewById<View>(R.id.btn_ask_about).setOnClickListener {
             launchAppWithScreenshot()
         }
 
-        // Input area (opens text input)
-        val inputArea = view.findViewById<android.view.View>(app.cogwheel.conduit.R.id.input_area)
-        inputArea?.setOnClickListener {
+        sendButton.setOnClickListener { sendInput() }
+        inputField.setOnEditorActionListener { _, actionId, _ ->
+            if (actionId == EditorInfo.IME_ACTION_SEND) {
+                sendInput()
+                true
+            } else {
+                false
+            }
+        }
+        inputField.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+            override fun afterTextChanged(s: Editable?) = updateSendButton()
+        })
+
+        dictationButton.setOnClickListener {
+            when {
+                isDictating -> bridge?.send("stopDictation")
+                !hasMicrophonePermission() -> launchApp()
+                else -> bridge?.send("startDictation")
+            }
+        }
+        voiceButton.setOnClickListener {
+            if (hasMicrophonePermission()) {
+                bridge?.send("startVoiceCall")
+            } else {
+                launchAppForVoiceCall()
+            }
+        }
+        muteButton.setOnClickListener { bridge?.send("toggleMute") }
+        speakerButton.setOnClickListener { bridge?.send("toggleSpeaker") }
+        endCallButton.setOnClickListener {
+            bridge?.send("endVoiceCall")
+            finish()
+        }
+        openAppButton.setOnClickListener {
+            // The call or chat keeps running; MainActivity attaches to the
+            // same engine and shows it.
+            bridge?.send("openInApp")
             launchApp()
         }
+    }
 
-        // Voice button - opens voice call directly
-        val voiceButton = view.findViewById<android.view.View>(app.cogwheel.conduit.R.id.btn_voice)
-        voiceButton?.setOnClickListener {
-            launchAppForVoiceCall()
+    private fun sendInput() {
+        val text = inputField.text?.toString()?.trim().orEmpty()
+        if (text.isEmpty() || isBusy) return
+        bridge?.send("sendText", mapOf("text" to text))
+        inputField.setText("")
+    }
+
+    private fun updateSendButton() {
+        val hasText = !inputField.text.isNullOrBlank()
+        sendButton.visibility = if (hasText && !isDictating) View.VISIBLE else View.GONE
+        sendButton.alpha = if (isBusy) 0.4f else 1f
+    }
+
+    override fun onStateChanged(state: Map<String, Any?>) {
+        if (root == null) return
+        if (state["close"] == true) {
+            finish()
+            return
+        }
+        render(state)
+    }
+
+    private fun render(state: Map<String, Any?>) {
+        @Suppress("UNCHECKED_CAST")
+        val labels = (state["labels"] as? Map<String, String>).orEmpty()
+        if (labels.isNotEmpty()) cachedLabels = labels
+        applyLabels(cachedLabels)
+
+        val mode = state["mode"] as? String ?: "idle"
+        val inCall = mode == "call"
+        val inConversation = mode != "idle"
+
+        pageActions.visibility = if (inConversation) View.GONE else View.VISIBLE
+        conversationCard.visibility = if (inConversation) View.VISIBLE else View.GONE
+        callControls.visibility = if (inCall) View.VISIBLE else View.GONE
+        inputBar.visibility = if (inCall) View.GONE else View.VISIBLE
+
+        titleText.setTextOrHide(state["title"] as? String)
+        statusText.setTextOrHide(state["status"] as? String)
+        transcriptText.setTextOrHide(state["transcript"] as? String)
+        errorText.setTextOrHide(state["error"] as? String)
+
+        val reply = state["reply"] as? String
+        if (reply.isNullOrEmpty()) {
+            replyScroll.visibility = View.GONE
+            replyText.text = ""
+        } else {
+            replyScroll.visibility = View.VISIBLE
+            if (replyText.text.toString() != reply) {
+                replyText.text = reply
+                clampReplyHeight()
+            }
         }
 
-        return view
+        val muted = state["isMuted"] == true
+        setToggle(muteButton, muteIcon, muted)
+        muteIcon.setImageResource(if (muted) R.drawable.ic_mic_off else R.drawable.ic_mic_on)
+        muteButton.contentDescription = label(if (muted) "unmute" else "mute")
+        val speakerOn = state["isSpeakerOn"] == true
+        setToggle(speakerButton, speakerIcon, speakerOn)
+        speakerButton.contentDescription = label(if (speakerOn) "speakerOff" else "speakerOn")
+
+        isBusy = state["isBusy"] == true
+        isDictating = state["isDictating"] == true
+        setToggle(dictationButton, dictationIcon, isDictating)
+        val dictationText = state["dictationText"] as? String
+        if (isDictating && dictationText != null &&
+            inputField.text?.toString() != dictationText
+        ) {
+            inputField.setText(dictationText)
+            inputField.setSelection(dictationText.length)
+        }
+        updateSendButton()
     }
+
+    private fun applyLabels(labels: Map<String, String>) {
+        labels["hint"]?.let { inputField.hint = it }
+        labels["send"]?.let { sendButton.contentDescription = it }
+        labels["dictation"]?.let { dictationButton.contentDescription = it }
+        labels["call"]?.let { voiceButton.contentDescription = it }
+        labels["end"]?.let { endCallButton.contentDescription = it }
+        labels["openInApp"]?.let { openAppButton.contentDescription = it }
+        root?.let { view ->
+            labels["summarize"]?.let {
+                view.findViewById<TextView>(R.id.label_summarize).text = it
+            }
+            labels["askAbout"]?.let {
+                view.findViewById<TextView>(R.id.label_ask_about).text = it
+            }
+        }
+    }
+
+    private fun label(key: String): String? = cachedLabels[key]
+
+    private fun setToggle(button: View, icon: ImageView, on: Boolean) {
+        button.setBackgroundResource(
+            if (on) R.drawable.assistant_toggle_on_bg else R.drawable.voice_button_bg
+        )
+        if (on) icon.setColorFilter(TOGGLE_ON_ICON_COLOR) else icon.clearColorFilter()
+        button.isActivated = on
+    }
+
+    /** Keeps a long reply scrollable inside the sheet, following its end. */
+    private fun clampReplyHeight() {
+        replyScroll.post {
+            val maxHeight =
+                (context.resources.displayMetrics.heightPixels * REPLY_MAX_HEIGHT_FRACTION).toInt()
+            val params = replyScroll.layoutParams
+            val wanted =
+                if (replyText.height > maxHeight) maxHeight else ViewGroup.LayoutParams.WRAP_CONTENT
+            if (params.height != wanted) {
+                params.height = wanted
+                replyScroll.layoutParams = params
+            }
+            replyScroll.fullScroll(View.FOCUS_DOWN)
+        }
+    }
+
+    private fun TextView.setTextOrHide(value: String?) {
+        if (value.isNullOrEmpty()) {
+            visibility = View.GONE
+        } else {
+            text = value
+            visibility = View.VISIBLE
+        }
+    }
+
+    private fun hasMicrophonePermission(): Boolean =
+        context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
 
     override fun onHandleAssist(
         data: Bundle?,
@@ -69,15 +373,11 @@ class ConduitVoiceInteractionSession(context: Context) : VoiceInteractionSession
     ) {
         super.onHandleAssist(data, structure, content)
 
-        android.util.Log.d("ConduitVoiceSession", "onHandleAssist called")
-
         // Capture screen context
         val screenContext = StringBuilder()
         structure?.let {
-            val nodes = it.windowNodeCount
-            for (i in 0 until nodes) {
-                val windowNode = it.getWindowNodeAt(i)
-                traverseNode(windowNode.rootViewNode, screenContext)
+            for (i in 0 until it.windowNodeCount) {
+                traverseNode(it.getWindowNodeAt(i).rootViewNode, screenContext)
             }
         }
         capturedContext = screenContext.toString()
@@ -86,13 +386,9 @@ class ConduitVoiceInteractionSession(context: Context) : VoiceInteractionSession
         data?.let {
             try {
                 capturedScreenshot = it.getParcelable("screenshot")
-                if (capturedScreenshot == null) {
-                    // Try alternative key
-                    capturedScreenshot = it.getParcelable("android.intent.extra.ASSIST_SCREENSHOT")
-                }
-                android.util.Log.d("ConduitVoiceSession", "Screenshot captured: ${capturedScreenshot != null}")
+                    ?: it.getParcelable("android.intent.extra.ASSIST_SCREENSHOT")
             } catch (e: Exception) {
-                android.util.Log.e("ConduitVoiceSession", "Failed to get screenshot from bundle", e)
+                android.util.Log.e(TAG, "Failed to get screenshot from bundle", e)
             }
         }
     }
@@ -100,118 +396,57 @@ class ConduitVoiceInteractionSession(context: Context) : VoiceInteractionSession
     override fun onHandleScreenshot(screenshot: Bitmap?) {
         super.onHandleScreenshot(screenshot)
         capturedScreenshot = screenshot
-        android.util.Log.d("ConduitVoiceSession", "Screenshot received via onHandleScreenshot: ${screenshot != null}")
     }
 
-    private fun launchApp() {
-        try {
-            android.util.Log.d("ConduitVoiceSession", "Attempting to launch app")
-            val intent = Intent(context, MainActivity::class.java)
-            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            intent.addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
-            intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
-
-            context.startActivity(intent)
-            android.util.Log.d("ConduitVoiceSession", "App launch requested")
-            finish() // Close the overlay
-        } catch (e: Exception) {
-            android.util.Log.e("ConduitVoiceSession", "Failed to launch app", e)
+    private fun appIntent(): Intent =
+        Intent(context, MainActivity::class.java).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
         }
+
+    private fun startApp(intent: Intent) {
+        try {
+            context.startActivity(intent)
+        } catch (e: Exception) {
+            android.util.Log.e(TAG, "Failed to launch app", e)
+        }
+        finish()
     }
 
-    private fun launchAppWithContext(includeScreenshot: Boolean) {
-        try {
-            android.util.Log.d("ConduitVoiceSession", "Attempting to launch app with context")
-            val intent = Intent(context, MainActivity::class.java)
-            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            intent.addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
-            intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
+    private fun launchApp() = startApp(appIntent())
 
-            if (capturedContext != null) {
-                intent.putExtra("screen_context", capturedContext)
-                android.util.Log.d("ConduitVoiceSession", "Context attached: ${capturedContext?.take(50)}...")
-            } else {
-                android.util.Log.d("ConduitVoiceSession", "No context captured")
-            }
-
-            context.startActivity(intent)
-            android.util.Log.d("ConduitVoiceSession", "App launch requested")
-            finish() // Close the overlay
-        } catch (e: Exception) {
-            android.util.Log.e("ConduitVoiceSession", "Failed to launch app", e)
-        }
+    private fun launchAppWithContext() {
+        startApp(appIntent().apply {
+            capturedContext?.let { putExtra("screen_context", it) }
+        })
     }
 
     private fun launchAppWithScreenshot() {
-        try {
-            android.util.Log.d("ConduitVoiceSession", "Attempting to launch app with screenshot")
-            val intent = Intent(context, MainActivity::class.java)
-            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            intent.addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
-            intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
-
-            // Save screenshot to cache and pass URI
-            capturedScreenshot?.let { bitmap ->
-                try {
-                    val file = java.io.File(context.cacheDir, "assistant_screenshot_${System.currentTimeMillis()}.png")
-                    val outputStream = java.io.FileOutputStream(file)
+        val intent = appIntent()
+        capturedScreenshot?.let { bitmap ->
+            try {
+                val file = java.io.File(
+                    context.cacheDir,
+                    "assistant_screenshot_${System.currentTimeMillis()}.png"
+                )
+                java.io.FileOutputStream(file).use { outputStream ->
                     bitmap.compress(Bitmap.CompressFormat.PNG, 100, outputStream)
-                    outputStream.flush()
-                    outputStream.close()
-
-                    intent.putExtra("screenshot_path", file.absolutePath)
-                    android.util.Log.d("ConduitVoiceSession", "Screenshot saved to: ${file.absolutePath}")
-                } catch (e: Exception) {
-                    android.util.Log.e("ConduitVoiceSession", "Failed to save screenshot", e)
                 }
-            } ?: run {
-                android.util.Log.d("ConduitVoiceSession", "No screenshot captured")
+                intent.putExtra("screenshot_path", file.absolutePath)
+            } catch (e: Exception) {
+                android.util.Log.e(TAG, "Failed to save screenshot", e)
             }
-
-            context.startActivity(intent)
-            android.util.Log.d("ConduitVoiceSession", "App launch requested with screenshot")
-            finish() // Close the overlay
-        } catch (e: Exception) {
-            android.util.Log.e("ConduitVoiceSession", "Failed to launch app with screenshot", e)
         }
+        startApp(intent)
     }
 
     private fun launchAppForNewChat() {
-        try {
-            android.util.Log.d("ConduitVoiceSession", "Attempting to launch app for new chat")
-            val intent = Intent(context, MainActivity::class.java)
-            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            intent.addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
-            intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
-
-            intent.putExtra("start_new_chat", true)
-            android.util.Log.d("ConduitVoiceSession", "New chat flag attached")
-
-            context.startActivity(intent)
-            android.util.Log.d("ConduitVoiceSession", "App launch requested for new chat")
-            finish()
-        } catch (e: Exception) {
-            android.util.Log.e("ConduitVoiceSession", "Failed to launch app for new chat", e)
-        }
+        startApp(appIntent().apply { putExtra("start_new_chat", true) })
     }
 
     private fun launchAppForVoiceCall() {
-        try {
-            android.util.Log.d("ConduitVoiceSession", "Attempting to launch app for voice call")
-            val intent = Intent(context, MainActivity::class.java)
-            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            intent.addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
-            intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
-
-            intent.putExtra("start_voice_call", true)
-            android.util.Log.d("ConduitVoiceSession", "Voice call flag attached")
-
-            context.startActivity(intent)
-            android.util.Log.d("ConduitVoiceSession", "App launch requested for voice call")
-            finish() // Close the overlay
-        } catch (e: Exception) {
-            android.util.Log.e("ConduitVoiceSession", "Failed to launch app for voice call", e)
-        }
+        startApp(appIntent().apply { putExtra("start_voice_call", true) })
     }
 
     private fun getTriggerPreference(): String {
@@ -232,7 +467,7 @@ class ConduitVoiceInteractionSession(context: Context) : VoiceInteractionSession
 
         // Also check content description for accessibility text
         if (node.contentDescription != null) {
-             builder.append(node.contentDescription).append("\n")
+            builder.append(node.contentDescription).append("\n")
         }
 
         for (i in 0 until node.childCount) {

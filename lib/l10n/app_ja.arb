@@ -1412,9 +1412,21 @@
   "@androidAssistantNewChatOption": {
     "description": "Option label for opening the app to a fresh chat from the assistant trigger."
   },
-  "androidAssistantVoiceCallOption": "音声通話を開始",
+  "androidAssistantVoiceCallOption": "オーバーレイで音声通話を開始",
   "@androidAssistantVoiceCallOption": {
     "description": "Option label for jumping straight into voice call from assistant trigger."
+  },
+  "assistantOpenInApp": "アプリで開く",
+  "@assistantOpenInApp": {
+    "description": "Assistant overlay button that continues the current voice call or chat in the full app."
+  },
+  "assistantSummarizePage": "ページを要約",
+  "@assistantSummarizePage": {
+    "description": "Assistant overlay button that sends the on-screen text to a new chat for a summary."
+  },
+  "assistantAskAboutPage": "ページについて質問",
+  "@assistantAskAboutPage": {
+    "description": "Assistant overlay button that attaches a screenshot of the current screen to a new chat."
   },
   "sttSettings": "音声入力",
   "@sttSettings": {
