@@ -11,6 +11,7 @@ import android.os.Bundle
 import android.service.voice.VoiceInteractionSession
 import android.text.Editable
 import android.text.TextWatcher
+import android.util.Log
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
@@ -102,6 +103,7 @@ class ConduitVoiceInteractionSession(context: Context) :
         if (root == null) return
 
         val autoStartCall = getTriggerPreference() == TRIGGER_VOICE_CALL
+        Log.d(TAG, "onShow autoStartCall=$autoStartCall mic=${hasMicrophonePermission()}")
         if (autoStartCall && !hasMicrophonePermission()) {
             // Only the app can ask for the permission; it starts the call there.
             launchAppForVoiceCall()
@@ -143,6 +145,7 @@ class ConduitVoiceInteractionSession(context: Context) :
         ConduitEngineHost.assistantAttached()
         engineAttached = true
         bridge = ConduitEngineHost.assistantOverlay?.also { it.listener = this }
+        Log.d(TAG, "Engine attached, bridge=${bridge != null}")
     }
 
     private fun detachEngine() {
@@ -157,6 +160,7 @@ class ConduitVoiceInteractionSession(context: Context) :
         }
         bridge = null
         ConduitEngineHost.assistantDetached()
+        Log.d(TAG, "Engine detached")
     }
 
     private fun bindViews(view: View) {
@@ -249,6 +253,7 @@ class ConduitVoiceInteractionSession(context: Context) :
     }
 
     override fun onStateChanged(state: Map<String, Any?>) {
+        Log.d(TAG, "State mode=${state["mode"]} status=${state["status"]} error=${state["error"]}")
         if (root == null) return
         if (state["close"] == true) {
             finish()
@@ -388,7 +393,7 @@ class ConduitVoiceInteractionSession(context: Context) :
                 capturedScreenshot = it.getParcelable("screenshot")
                     ?: it.getParcelable("android.intent.extra.ASSIST_SCREENSHOT")
             } catch (e: Exception) {
-                android.util.Log.e(TAG, "Failed to get screenshot from bundle", e)
+                Log.e(TAG, "Failed to get screenshot from bundle", e)
             }
         }
     }
@@ -409,7 +414,7 @@ class ConduitVoiceInteractionSession(context: Context) :
         try {
             context.startActivity(intent)
         } catch (e: Exception) {
-            android.util.Log.e(TAG, "Failed to launch app", e)
+            Log.e(TAG, "Failed to launch app", e)
         }
         finish()
     }
@@ -435,7 +440,7 @@ class ConduitVoiceInteractionSession(context: Context) :
                 }
                 intent.putExtra("screenshot_path", file.absolutePath)
             } catch (e: Exception) {
-                android.util.Log.e(TAG, "Failed to save screenshot", e)
+                Log.e(TAG, "Failed to save screenshot", e)
             }
         }
         startApp(intent)

@@ -47,7 +47,10 @@ object ConduitEngineHost {
 
     /** The shared engine, started (and its Dart entrypoint run) on first use. */
     fun obtain(context: Context): FlutterEngine {
-        FlutterEngineCache.getInstance().get(ENGINE_ID)?.let { return it }
+        FlutterEngineCache.getInstance().get(ENGINE_ID)?.let {
+            Log.d(TAG, "Reusing running engine")
+            return it
+        }
 
         val appContext = context.applicationContext
         val engine = FlutterEngine(appContext)
